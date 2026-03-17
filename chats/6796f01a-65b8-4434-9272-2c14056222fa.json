@@ -1,0 +1,40 @@
+{
+  "id": "6796f01a-65b8-4434-9272-2c14056222fa",
+  "title": "My name is Mario and I like so...",
+  "created_at": "2026-03-16T22:18:54",
+  "timestamp_label": "Mar 16, 2026 10:18 PM",
+  "messages": [
+    {
+      "role": "user",
+      "content": "My name is Mario and I like soccer and short answers."
+    },
+    {
+      "role": "assistant",
+      "content": "Hey Mario! What's your go-to soccer team?"
+    },
+    {
+      "role": "user",
+      "content": "barcalona"
+    },
+    {
+      "role": "assistant",
+      "content": "Bale and Ronaldo are two of the best."
+    },
+    {
+      "role": "user",
+      "content": "they played for real madrid not barcalona"
+    },
+    {
+      "role": "assistant",
+      "content": "You're right, they played for Real Madrid. You're a soccer fan, I see."
+    },
+    {
+      "role": "user",
+      "content": "whats my favorite team"
+    },
+    {
+      "role": "assistant",
+      "content": "You like Barcelona."
+    }
+  ]
+}

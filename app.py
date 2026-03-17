@@ -12,6 +12,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 API_URL = "https://router.huggingface.co/v1/chat/completions"
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 CHATS_DIR = Path("chats")
+MEMORY_FILE = Path("memory.json")
 
 
 def load_hf_token():
@@ -44,6 +45,90 @@ def make_new_chat():
         "timestamp_label": now.strftime("%b %d, %Y %I:%M %p"),
         "messages": [],
     }
+
+
+def load_memory_from_disk() -> dict:
+    """Load saved user memory from disk."""
+    if not MEMORY_FILE.exists():
+        return {}
+
+    try:
+        data = json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def save_memory(memory: dict):
+    """Persist user memory to disk."""
+    MEMORY_FILE.write_text(json.dumps(memory, indent=2), encoding="utf-8")
+
+
+def merge_memory(existing_memory: dict, new_memory: dict) -> dict:
+    """Merge newly extracted traits into existing memory."""
+    merged = dict(existing_memory)
+
+    for key, value in new_memory.items():
+        if value in (None, "", [], {}):
+            continue
+
+        if isinstance(value, list):
+            old_value = merged.get(key, [])
+            if not isinstance(old_value, list):
+                old_value = [old_value] if old_value not in (None, "", [], {}) else []
+
+            combined = []
+            for item in old_value + value:
+                if item not in combined and item not in (None, "", [], {}):
+                    combined.append(item)
+            merged[key] = combined
+        else:
+            merged[key] = value
+
+    return merged
+
+
+def parse_json_object(text: str) -> dict:
+    """Parse a JSON object from raw model text."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
+    start_index = cleaned.find("{")
+    end_index = cleaned.rfind("}")
+    if start_index == -1 or end_index == -1 or end_index < start_index:
+        return {}
+
+    parsed = json.loads(cleaned[start_index : end_index + 1])
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def build_system_prompt(memory: dict) -> str:
+    """Create a system prompt that includes saved user memory."""
+    if not memory:
+        return (
+            "You are a helpful AI assistant. Answer clearly, naturally, and stay "
+            "consistent with the ongoing conversation."
+        )
+
+    memory_json = json.dumps(memory, ensure_ascii=True)
+    return (
+        "You are a helpful AI assistant. Use the saved user memory below to "
+        "personalize responses when relevant, but do not mention the memory unless "
+        "it helps answer the user's request.\n"
+        f"Saved user memory: {memory_json}"
+    )
+
+
+def build_model_messages(memory: dict, chat_messages: list[dict]) -> list[dict]:
+    """Combine persistent memory with the current chat history."""
+    return [{"role": "system", "content": build_system_prompt(memory)}] + chat_messages
 
 
 def get_chat_file_path(chat_id: str) -> Path:
@@ -107,6 +192,9 @@ def initialize_session_state():
             st.session_state.active_chat_id = first_chat["id"]
             save_chat(first_chat)
 
+    if "memory" not in st.session_state:
+        st.session_state.memory = load_memory_from_disk()
+
 
 def get_active_chat():
     """Return the active chat record."""
@@ -144,6 +232,22 @@ def delete_chat(chat_id: str):
 
     if st.session_state.active_chat_id == chat_id:
         st.session_state.active_chat_id = remaining_chats[0]["id"]
+
+
+def request_json_response(hf_token: str, messages: list[dict]) -> str:
+    """Send a non-streaming request and return text content."""
+    headers = {"Authorization": f"Bearer {hf_token}"}
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 256,
+    }
+
+    response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+    response.raise_for_status()
+
+    data = response.json()
+    return data["choices"][0]["message"]["content"].strip()
 
 
 def stream_chat_response(hf_token: str, messages: list[dict]):
@@ -189,6 +293,26 @@ def stream_chat_response(hf_token: str, messages: list[dict]):
                 yield content
 
 
+def extract_user_memory(hf_token: str, user_message: str) -> dict:
+    """Ask the model to extract user traits/preferences as JSON."""
+    extraction_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Extract personal traits, preferences, identity details, or useful "
+                "user facts from the user's message. Return only a JSON object. "
+                "Use short keys like name, interests, preferred_language, "
+                "communication_style, favorite_topics, or preferences. If there is "
+                "nothing useful to store, return {}."
+            ),
+        },
+        {"role": "user", "content": user_message},
+    ]
+
+    extraction_text = request_json_response(hf_token, extraction_messages)
+    return parse_json_object(extraction_text)
+
+
 def show_api_error(error: Exception):
     """Convert API failures into user-visible Streamlit messages."""
     if isinstance(error, requests.exceptions.HTTPError):
@@ -213,6 +337,17 @@ def render_sidebar():
         st.header("Chats")
         if st.button("New Chat", use_container_width=True):
             create_new_chat()
+            st.rerun()
+
+        st.subheader("User Memory")
+        if st.session_state.memory:
+            st.json(st.session_state.memory)
+        else:
+            st.caption("No saved memory yet.")
+
+        if st.button("Clear Memory", use_container_width=True):
+            st.session_state.memory = {}
+            save_memory(st.session_state.memory)
             st.rerun()
 
         chat_list = st.container(height=500)
@@ -287,7 +422,10 @@ def main():
     try:
         with st.chat_message("assistant"):
             assistant_reply = st.write_stream(
-                stream_chat_response(hf_token, active_chat["messages"])
+                stream_chat_response(
+                    hf_token,
+                    build_model_messages(st.session_state.memory, active_chat["messages"]),
+                )
             )
     except (requests.exceptions.RequestException, KeyError, IndexError, TypeError, ValueError) as exc:
         show_api_error(exc)
@@ -296,6 +434,23 @@ def main():
     assistant_message = {"role": "assistant", "content": assistant_reply}
     active_chat["messages"].append(assistant_message)
     save_chat(active_chat)
+
+    try:
+        extracted_memory = extract_user_memory(hf_token, prompt)
+    except (
+        requests.exceptions.RequestException,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        extracted_memory = {}
+
+    if extracted_memory:
+        st.session_state.memory = merge_memory(st.session_state.memory, extracted_memory)
+        save_memory(st.session_state.memory)
+
     st.rerun()
 
 
